@@ -1,0 +1,228 @@
+name: Nightly_Joy Build
+
+on:
+  push:
+    branches:
+      - Joy
+      - master
+  schedule:
+    # cronjob that triggers every day at 2PM UTC
+    - cron: '0 14 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: nightly-${{ github.event_name }}
+  cancel-in-progress: false
+
+jobs:
+  check_recent_commit:
+    runs-on: ubuntu-latest
+    name: Check Recent Commit (${{ github.event_name }})
+    outputs:
+      should_run: ${{ steps.should_run.outputs.should_run }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: should_run
+        run: |
+          if [ "${{ github.event_name }}" = "push" ]; then
+            echo "should_run=true" >> $GITHUB_OUTPUT
+          elif [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "should_run=true" >> $GITHUB_OUTPUT
+          elif [ -z "$(git rev-list --since="24 hours ago" --all)" ]; then
+            echo "should_run=false" >> $GITHUB_OUTPUT
+          else
+            echo "should_run=true" >> $GITHUB_OUTPUT
+          fi
+
+  build_nightly:
+    runs-on: windows-latest
+    name: Build Nightly (${{ github.event_name }})
+    needs: check_recent_commit
+    if: needs.check_recent_commit.outputs.should_run == 'true'
+    outputs:
+      full_sha: ${{ steps.var.outputs.full_sha }}
+      short_sha: ${{ steps.var.outputs.short_sha }}
+      branch: ${{ steps.var.outputs.branch }}
+      commits: ${{ steps.commit_info.outputs.commits }}
+      commit_count: ${{ steps.count.outputs.commit_count }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Check CMake version
+        run: cmake --version
+
+      - name: Setup MSVC environment
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: amd64
+
+      - name: Generate CMake project
+        run: cmake -D CMAKE_BUILD_TYPE=RelWithDebInfo -D OPTIMIZE=YES -S. -Bbuild -G Ninja
+
+      - name: Build 64bit release DLL
+        run: cmake --build ./build --config RelWithDebInfo --target YimMenu --
+
+      - name: Upload DLL Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: YimMenu.dll
+          path: build/YimMenu.dll
+
+      - name: Upload PDB Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: YimMenu.pdb
+          path: build/YimMenu.pdb
+
+      - name: Generate Build Info
+        id: var
+        run: |
+          echo "full_sha=$(git rev-parse HEAD)" >> $env:GITHUB_OUTPUT
+          echo "short_sha=$(git rev-parse --short HEAD)" >> $env:GITHUB_OUTPUT
+          echo "branch=$(git branch --show-current)" >> $env:GITHUB_OUTPUT
+
+      - name: Get Commit Count
+        id: count
+        run: |
+          echo "commit_count=$(git rev-list --count HEAD)" >> $env:GITHUB_OUTPUT
+
+      - name: Extract Pushed Commits
+        id: commit_info
+        shell: pwsh
+        run: |
+          git fetch --prune --unshallow
+
+          $beforeSha = "${{ github.event.before }}"
+          $afterSha = "${{ github.event.after }}"
+          $repo = "${{ github.repository }}"
+
+          Write-Host "获取从 $beforeSha 到 $afterSha 的提交"
+
+          $commits = git rev-list --reverse "$beforeSha..$afterSha"
+          $formattedCommits = @()
+
+          foreach ($commit in $commits) {
+              $hash = git rev-parse --short=7 $commit
+              $message = git log -1 --format="%s" $commit
+              $author = git log -1 --format="%an" $commit
+              $date = git log -1 --format="%ad" --date=short $commit
+
+              # 替换 # 为 - 加空格，防止 GitHub 自动识别为 issue 链接
+              $message = $message -replace '#', '- '
+
+              $formattedCommits += "- ${hash}: ${message} (${author}, ${date})"
+          }
+
+          if ($formattedCommits.Count -eq 0) {
+              Write-Host "未找到提交，使用最新提交"
+              $commit = git rev-parse HEAD
+              $hash = git rev-parse --short=7 $commit
+              $message = git log -1 --format="%s" $commit
+              $author = git log -1 --format="%an" $commit
+              $date = git log -1 --format="%ad" --date=short $commit
+
+              $message = $message -replace '#', '- '
+
+              $formattedCommits += "- ${hash}: ${message} (${author}, ${date})"
+          }
+
+          $commitMessage = $formattedCommits -join "`n"
+          echo "commits<<EOF" >> $env:GITHUB_OUTPUT
+          echo "$commitMessage" >> $env:GITHUB_OUTPUT
+          echo "EOF" >> $env:GITHUB_OUTPUT
+
+          Write-Host "本次推送的提交:"
+          Write-Host $commitMessage
+
+  recreate_release:
+    runs-on: ubuntu-latest
+    name: Recreate Release (${{ github.event_name }})
+    needs: build_nightly
+    if: needs.check_recent_commit.outputs.should_run == 'true'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.build_nightly.outputs.full_sha }}
+          fetch-depth: 0
+
+      - name: Delete Existing Release (nightly)
+        uses: actions/github-script@v6
+        with:
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const branch = "${{ needs.build_nightly.outputs.branch }}";
+            const tag = `nightly-${branch}`;
+            const releases = await github.rest.repos.listReleases({ owner, repo });
+            const release = releases.data.find(r => r.tag_name === tag);
+            if (release) {
+              await github.rest.repos.deleteRelease({ owner, repo, release_id: release.id });
+            }
+            try {
+              await github.rest.git.deleteRef({ owner, repo, ref: `tags/${tag}` });
+            } catch (e) {
+              console.log(`No existing ${tag} tag to delete`);
+            }
+
+      - name: Download DLL Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: YimMenu.dll
+
+      - name: Download PDB Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: YimMenu.pdb
+
+      - name: Echo build sha256
+        id: build_sha
+        run: |
+          sha256sum YimMenu.dll > sha256.checksum
+          echo "build_sha=$(cat sha256.checksum)" >> $GITHUB_OUTPUT
+          cat sha256.checksum
+
+      - name: Nightly Release (latest)
+        uses: softprops/action-gh-release@v1
+        with:
+          name: Nightly [${{ needs.build_nightly.outputs.short_sha }}] (${{ github.event_name }} - ${{ needs.build_nightly.outputs.branch }})
+          tag_name: nightly-${{ needs.build_nightly.outputs.branch }}
+          target_commitish: ${{ needs.build_nightly.outputs.full_sha }}
+          body: |
+            **Latest nightly build**
+            Branch: `${{ needs.build_nightly.outputs.branch }}`
+            Trigger: `${{ github.event_name }}`
+            Commit: `${{ needs.build_nightly.outputs.full_sha }}`
+            SHA256:
+            ```
+            ${{ steps.build_sha.outputs.build_sha }}
+            ```
+          files: |
+            YimMenu.dll
+            YimMenu.pdb
+
+      - name: Nightly Release (archived)
+        uses: softprops/action-gh-release@v1
+        with:
+          name: Nightly Archive [${{ needs.build_nightly.outputs.commit_count }}] (${{ needs.build_nightly.outputs.branch }})
+          tag_name: nightly-${{ needs.build_nightly.outputs.branch }}-${{ needs.build_nightly.outputs.commit_count }}
+          target_commitish: ${{ needs.build_nightly.outputs.full_sha }}
+          body: |
+            **Archived nightly build**
+            Branch: `${{ needs.build_nightly.outputs.branch }}`
+            Trigger: `${{ github.event_name }}`
+            Commit: `${{ needs.build_nightly.outputs.full_sha }}`
+
+            SHA256:
+            ```
+            ${{ steps.build_sha.outputs.build_sha }}
+            ```
+
+            **Commits in this push**
+
+            ${{ needs.build_nightly.outputs.commits }}
+          files: |
+            YimMenu.dll
+            YimMenu.pdb
