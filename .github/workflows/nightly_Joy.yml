@@ -191,6 +191,8 @@ jobs:
           tag_name: nightly-${{ needs.build_nightly.outputs.branch }}
           target_commitish: ${{ needs.build_nightly.outputs.full_sha }}
           body: |
+            [Link to build](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
+
             **Latest nightly build**
             Branch: `${{ needs.build_nightly.outputs.branch }}`
             Trigger: `${{ github.event_name }}`
@@ -199,6 +201,17 @@ jobs:
             ```
             ${{ steps.build_sha.outputs.build_sha }}
             ```
+
+            To verify the build SHA256 during the action, click the build link, go-to "Create Release", open the "Echo build sha256" step and read the sha256.
+
+            You can download the build artifacts, generate a SHA256 checksum and compare it with the below binary.
+            Build artifacts ARE NOT automatically the same as release assets since release assets can be modified afterwards.
+
+            These are nightly builds of YimMenu, they are provided for testing purposes only:
+            - Test if your build environment produces a broken YimMenu.dll
+            - Test if source code is out of date and no longer compatible with the current version of Grand Theft Auto V
+
+            If you wish to use this menu as-is you are on your own, no warranty is provided.
           files: |
             YimMenu.dll
             YimMenu.pdb
@@ -210,6 +223,8 @@ jobs:
           tag_name: nightly-${{ needs.build_nightly.outputs.branch }}-${{ needs.build_nightly.outputs.commit_count }}
           target_commitish: ${{ needs.build_nightly.outputs.full_sha }}
           body: |
+            [Link to build](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
+
             **Archived nightly build**
             Branch: `${{ needs.build_nightly.outputs.branch }}`
             Trigger: `${{ github.event_name }}`
